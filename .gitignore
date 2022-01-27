@@ -1,0 +1,8 @@
+/target
+
+# Dictionaries you can get elsewhere
+Dictionary*
+
+# Results from tests
+Results*
+*.csv
