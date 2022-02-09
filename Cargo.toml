@@ -9,10 +9,16 @@ edition = "2021"
 
 [dependencies]
 text_io = "0.1.9"
+rayon = "1.5.1"
+indicatif = {version = "0.16.2", features = ["rayon"]}
+ordered-float = "2.10.0"
+approx = "0.5.1"
 
 [dev-dependencies]
-rayon = "1.5.1"
 
 [profile.release]
-strip = true  # Automatically strip symbols from the binary.
-opt-level = "z"  # Optimize for size.
+# strip = true  # Automatically strip symbols from the binary.
+# opt-level = "z"  # Optimize for size.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["--no-rosegment"]
