@@ -6,3 +6,5 @@ Dictionary*
 # Results from tests
 Results*
 *.csv
+
+Cargo.lock
