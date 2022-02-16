@@ -3,9 +3,10 @@ use std::cmp;
 use crate::{
     autosolve, filter_dictionary,
     word_stats::{
-        self, sort_dictionary_frequency, sort_dictionary_location, CorrectPosition,
-        IncorrectPosition,
+        sort_dictionary_frequency, sort_dictionary_location, CharacterCorrectness,
+        CharacterRENAMEME, CorrectPosition, IncorrectPosition,
     },
+    wordle_data::Game,
 };
 
 pub(crate) fn find_path(mut dictionary: Vec<&str>) {
@@ -40,7 +41,7 @@ pub(crate) fn manual_guessing(mut dictionary: Vec<&str>) {
             },
             top_ans
         );
-        if !(dictionary.len() > 1) {
+        if dictionary.is_empty() {
             return;
         }
 
@@ -51,8 +52,14 @@ pub(crate) fn manual_guessing(mut dictionary: Vec<&str>) {
         for (i, character) in word.chars().enumerate() {
             println!("Was {character} correct (c) in the string (s) or nothing (empty)");
             match readline().as_str() {
-                "c" => correct_positions.push(CorrectPosition { pos: i, character }),
-                "s" => incorrect_positions.push(IncorrectPosition { pos: i, character }),
+                "c" => correct_positions.push(CorrectPosition {
+                    position: i,
+                    character,
+                }),
+                "s" => incorrect_positions.push(IncorrectPosition {
+                    position: i,
+                    character,
+                }),
                 "" => {}
                 _ => todo!("Die blaine"),
             }
@@ -79,20 +86,16 @@ pub(crate) fn manual_guessing(mut dictionary: Vec<&str>) {
     }
 }
 
-pub(crate) fn manual_guessing_entropy(mut dictionary: Vec<&str>) {
-    let mut guess_dictionary = dictionary.clone();
-    println!(
-        "{numleft} remaining words in dictionary",
-        numleft = dictionary.len()
-    );
+pub(crate) fn manual_guessing_entropy(game: &mut Game) {
+    println!("{} possible words remaining", game.remaining_words());
     loop {
-        word_stats::sort_dictionary_entropy_progress(&mut guess_dictionary,&dictionary);
-        let top_ans = guess_dictionary.get(..cmp::min(guess_dictionary.len(), 3)).unwrap();
+        let answers = game.possible_words();
+        let top_ans = answers.get(..cmp::min(game.remaining_words(), 3)).unwrap();
         println!(
             "The top {:?} {}:\n{:?}",
             top_ans.len(),
             {
-                if guess_dictionary.len() > 1 {
+                if top_ans.len() > 1 {
                     "answers remaining"
                 } else {
                     "answer is"
@@ -100,42 +103,42 @@ pub(crate) fn manual_guessing_entropy(mut dictionary: Vec<&str>) {
             },
             top_ans
         );
-        if !(guess_dictionary.len() > 1) {
-            return;
-        }
 
         println!("What word did you enter?");
         let word: String = readline();
-        let mut incorrect_positions: Vec<IncorrectPosition> = Vec::new();
-        let mut correct_positions: Vec<CorrectPosition> = Vec::new();
-        for (i, character) in word.chars().enumerate() {
+        for (pos, character) in word.chars().enumerate() {
             println!("Was {character} correct (c) in the string (s) or nothing (empty)");
             match readline().as_str() {
-                "c" => correct_positions.push(CorrectPosition { pos: i, character }),
-                "s" => incorrect_positions.push(IncorrectPosition { pos: i, character }),
-                "" => {}
-                _ => todo!("Die blaine"),
+                "c" => game.add_information(CharacterRENAMEME {
+                    pos,
+                    character: CharacterCorrectness::CorrectPosition(character),
+                }),
+                "s" => game.add_information(CharacterRENAMEME {
+                    pos,
+                    character: CharacterCorrectness::IncorrectPosition(character),
+                }),
+                "" => game.add_information(CharacterRENAMEME {
+                    pos,
+                    character: CharacterCorrectness::NotInWord(character),
+                }),
+                _ => println!("Skipping character..."),
             }
         }
 
-        filter_dictionary(
-            &mut guess_dictionary,
-            word,
-            incorrect_positions,
-            correct_positions,
+        println!("Evaluating word data");
+        // game.add_guess(&word);
+        let guess_results = game.evaluate_information(&word);
+        println!("Guessing {word} had an estimated entropy of {estimated},\nbut actually had an entropy of {actual}",
+            word=guess_results.guess,
+            estimated=guess_results.estimated_entropy,
+            actual=guess_results.actual_entropy
+        );
+        println!(
+            "There were a total of {} results",
+            guess_results.possible_answers.unwrap().len()
         );
 
-        println!(
-            "{numleft} remaining word{s} in dictionary",
-            numleft = guess_dictionary.len(),
-            s = {
-                if guess_dictionary.len() > 1 {
-                    "s"
-                } else {
-                    ""
-                }
-            }
-        );
+        println!("{} Remaining", game.remaining_words());
     }
 }
 

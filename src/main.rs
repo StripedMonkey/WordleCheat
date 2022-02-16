@@ -2,27 +2,32 @@
 #[macro_use]
 extern crate approx;
 
+mod file_reading;
 mod information_theory;
 mod manual_guessing;
 mod word_stats;
+mod wordle_data;
 
-use crate::manual_guessing::readline;
+use crate::{manual_guessing::readline, word_stats::generate_dict_weights_map};
 use word_stats::{
     sort_dictionary_frequency, sort_dictionary_location, CorrectPosition, IncorrectPosition,
 };
 
 fn main() {
-    let dictionary: Vec<&str> = include_str!("../Dictionary3b1bValidAnswers.txt").split("\n").collect();
+    let dictionary: Vec<&str> = include_str!("../Dictionary3b1bValidAnswers.txt")
+        .split('\n')
+        .collect();
+    let weight_map = generate_dict_weights_map(None, &dictionary);
     // print!("How many letters is the wordle? ");
     // io::stdout().flush().unwrap();
     // let word_len: usize = readline();
     // dictionary.drain_filter(|f| f.len() != word_len);
 
+    let mut game = wordle_data::Game::new(Some(weight_map), Some(&dictionary));
+
     println!("Use entropy approach (e) or heurisitc approach? (h)");
     match readline().to_ascii_lowercase().as_str() {
-        "e" => {
-            manual_guessing::manual_guessing_entropy(dictionary)
-        },
+        "e" => manual_guessing::manual_guessing_entropy(&mut game),
         "h" => {
             println!("Solve puzzle (s) or find path (p)?");
             match readline().as_str() {
@@ -46,10 +51,8 @@ fn filter_dictionary(
     dictionary.drain_filter(|f| {
         // Remove words with characters we know aren't in the word
         for character in guessed_word.chars() {
-            if !(x.contains(character)) {
-                if f.contains(character) {
-                    return true;
-                }
+            if !(x.contains(character)) && f.contains(character) {
+                return true;
             }
         }
 
@@ -62,18 +65,18 @@ fn filter_dictionary(
 
         // Remove words without the letters in their correct positions
         for correct in &correct_positions {
-            if f.chars().nth(correct.pos) != Some(correct.character) {
+            if f.chars().nth(correct.position) != Some(correct.character) {
                 return true;
             }
         }
 
         // Remove words with with a character in the incorrect position
         for character in &incorrect_positions {
-            if Some(character.character) == f.chars().nth(character.pos) {
+            if Some(character.character) == f.chars().nth(character.position) {
                 return true;
             }
         }
-        return false;
+        false
     });
 }
 
@@ -82,7 +85,7 @@ fn find_correct_positions(guess: &str, answer: &str) -> Vec<CorrectPosition> {
     for (i, (guess, answer)) in guess.chars().zip(answer.chars()).enumerate() {
         if guess == answer {
             correct.push(CorrectPosition {
-                pos: i,
+                position: i,
                 character: answer,
             })
         }
@@ -93,13 +96,11 @@ fn find_correct_positions(guess: &str, answer: &str) -> Vec<CorrectPosition> {
 fn find_incorrect_characters(guess: &str, answer: &str) -> Vec<IncorrectPosition> {
     let mut correct: Vec<IncorrectPosition> = Vec::new();
     for (i, (guess_c, answer_c)) in guess.chars().zip(answer.chars()).enumerate() {
-        if guess_c != answer_c {
-            if answer.contains(guess_c) {
-                correct.push(IncorrectPosition {
-                    pos: i,
-                    character: guess_c,
-                })
-            }
+        if guess_c != answer_c && answer.contains(guess_c) {
+            correct.push(IncorrectPosition {
+                position: i,
+                character: guess_c,
+            })
         }
     }
     correct

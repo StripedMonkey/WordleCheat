@@ -1,38 +1,43 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
-use indicatif::{ParallelProgressIterator, ProgressIterator};
+use indicatif::ParallelProgressIterator;
 use ordered_float::NotNan;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 
-use crate::information_theory::calculate_expected_entropy;
+use crate::{file_reading::read_frequencytable_file, information_theory::calculate_expected_entropy};
 
 pub(crate) const WORDLESIZE: usize = 5;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub(crate) enum CharacterCorrectness {
     NotInWord(char),
     IncorrectPosition(char),
     CorrectPosition(char),
 }
-pub(crate) struct CharCounter {
+
+// TODO: Figure out what to call this. It's the CharacterCorrectness with positional information
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+pub(crate) struct CharacterRENAMEME {
     pub pos: usize,
+    pub character: CharacterCorrectness,
+}
+
+pub(crate) struct CharFrequencies {
+    pub frequency: usize,
     pub character: char,
 }
-pub(crate) type WordGuess = Vec<CharacterCorrectness>;
-pub(crate) type IncorrectPosition = CharCounter;
-pub(crate) type CorrectPosition = CharCounter;
 
-pub(crate) fn count_unique_chars(s: &str) -> usize {
-    let mut uniq_characters: Vec<char> = Vec::new();
-    for character in s.chars() {
-        if !uniq_characters.contains(&character) {
-            uniq_characters.push(character);
-        }
-    }
-    uniq_characters.len()
+pub(crate) struct CharPosition {
+    pub position: usize,
+    pub character: char,
 }
 
-pub(crate) fn evaulate_uniqueness(unique_characters: &Vec<CharCounter>, word: &str) -> usize {
+pub(crate) type WordGuess = Vec<CharacterRENAMEME>;
+pub(crate) type IncorrectPosition = CharPosition;
+pub(crate) type CorrectPosition = CharPosition;
+
+pub(crate) fn evaulate_uniqueness(unique_characters: &Vec<CharFrequencies>, word: &str) -> usize {
     let mut used = Vec::new();
     let mut value: usize = 0;
     for character in word.chars() {
@@ -41,14 +46,15 @@ pub(crate) fn evaulate_uniqueness(unique_characters: &Vec<CharCounter>, word: &s
             let idx = unique_characters
                 .binary_search_by_key(&character, |f| f.character)
                 .expect("Couldn't find character in list!");
-            value += unique_characters[idx].pos;
+            value += unique_characters[idx].frequency;
         }
     }
     value
 }
 
-pub(crate) fn character_frequencies(dictionary: &Vec<&str>) -> Vec<CharCounter> {
-    let mut unique_characters_list: Vec<CharCounter> = Vec::new();
+/// Generate a list of the frequency of each Character in a dictionary
+pub(crate) fn character_frequencies(dictionary: &Vec<&str>) -> Vec<CharFrequencies> {
+    let mut unique_characters_list: Vec<CharFrequencies> = Vec::new();
     for word in &*dictionary {
         // Count the number of unique characters in each word
         let mut unique_characters: Vec<char> = Vec::new();
@@ -62,34 +68,50 @@ pub(crate) fn character_frequencies(dictionary: &Vec<&str>) -> Vec<CharCounter> 
         for character in unique_characters {
             match unique_characters_list.binary_search_by_key(&character, |f| f.character) {
                 Ok(i) => {
-                    unique_characters_list[i] = CharCounter {
+                    unique_characters_list[i] = CharFrequencies {
                         // Should actually just increment this, but meh
                         character,
-                        pos: unique_characters_list[i].pos + 1,
+                        frequency: unique_characters_list[i].frequency + 1,
                     }
                 }
-                Err(i) => unique_characters_list.insert(i, CharCounter { character, pos: 1 }),
+                Err(i) => unique_characters_list.insert(
+                    i,
+                    CharFrequencies {
+                        character,
+                        frequency: 1,
+                    },
+                ),
             }
         }
     }
     unique_characters_list
 }
+
+/// Sort a dictionary by most frequent to least frequent characters within the dictionary
 pub(crate) fn sort_dictionary_frequency(dictionary: &mut Vec<&str>) {
     // Sort by the frequency of unique characters in each word
-    let unique_characters = character_frequencies(&dictionary);
+    let unique_characters = character_frequencies(dictionary);
     dictionary.sort_by_cached_key(|word| evaulate_uniqueness(&unique_characters, word));
     dictionary.reverse();
 }
 
+/// Sort a dictionary by the most common locations for characters to least common
 pub(crate) fn sort_dictionary_location(dictionary: &mut Vec<&str>) {
-    let unique_positions = count_unique_positions(&dictionary);
+    let unique_positions = count_unique_positions(dictionary);
     dictionary.sort_by_cached_key(|a| count_location(&unique_positions, a));
     dictionary.reverse();
 }
 
-pub(crate) fn sort_dictionary_entropy_progress(guess_dictionary: &mut Vec<&str>,filtered_dictionary: &Vec<&str>) {
-    let map: HashMap<&str, f64> = guess_dictionary
-        .par_iter().progress_with(
+/// Sort a dictionary based on the entropy of a dictionary with progress bars
+pub(crate) fn sort_dictionary_entropy_progress(
+    // TODO: This should be moved into the wordle data because it's not
+    // possible to calculate this without a lot of external data.
+    guess_dictionary: &mut Vec<&str>,
+    filtered_dictionary: &Vec<&str>,
+) {
+    let map: FxHashMap<&str, f64> = guess_dictionary
+        .par_iter()
+        .progress_with(
             indicatif::ProgressBar::new(filtered_dictionary.len() as u64)
                 .with_message("Total Progress")
                 .with_style(
@@ -100,14 +122,22 @@ pub(crate) fn sort_dictionary_entropy_progress(guess_dictionary: &mut Vec<&str>,
                         .progress_chars("##-"),
                 ),
         )
-        .map(|s| (*s, calculate_expected_entropy(s, &filtered_dictionary)))
+        .map(|s| {
+            (
+                *s,
+                calculate_expected_entropy(
+                    s,
+                    filtered_dictionary,
+                    &generate_dict_weights_map(Some(&read_frequencytable_file("count_1w.txt")), guess_dictionary),
+                ),
+            )
+        })
         .collect();
     guess_dictionary.sort_by_cached_key(|s| NotNan::new(*map.get(s).unwrap()).unwrap());
     guess_dictionary.reverse();
-
 }
 
-pub(crate) fn count_location(positions: &HashMap<char, Vec<usize>>, word: &str) -> usize {
+pub(crate) fn count_location(positions: &FxHashMap<char, Vec<usize>>, word: &str) -> usize {
     let mut value: usize = 0;
     for (i, character) in word.chars().enumerate() {
         value += positions.get(&character).expect("Couldn't find character!")[i];
@@ -115,8 +145,8 @@ pub(crate) fn count_location(positions: &HashMap<char, Vec<usize>>, word: &str) 
     value
 }
 
-pub(crate) fn count_unique_positions(dictionary: &Vec<&str>) -> HashMap<char, Vec<usize>> {
-    let mut unique_positions: HashMap<char, Vec<usize>> = HashMap::new();
+pub(crate) fn count_unique_positions(dictionary: &Vec<&str>) -> FxHashMap<char, Vec<usize>> {
+    let mut unique_positions: FxHashMap<char, Vec<usize>> = FxHashMap::default();
     for word in &*dictionary {
         for (i, character) in word.chars().enumerate() {
             match unique_positions.get_mut(&character) {
@@ -132,44 +162,89 @@ pub(crate) fn count_unique_positions(dictionary: &Vec<&str>) -> HashMap<char, Ve
     unique_positions
 }
 
-pub(crate) fn is_valid_guess(validation: &WordGuess, word: &str) -> bool {
-    for (word_character, guess_character) in word.chars().zip(validation.iter()) {
-        match guess_character {
+/// Verifies that a particular word is a valid guess given a set of information
+pub(crate) fn is_valid_guess(validation: &Vec<CharacterRENAMEME>, word: &str) -> bool {
+    for correctness in validation {
+        match correctness.character {
             CharacterCorrectness::NotInWord(c) => {
-                if word.contains(*c) {
+                if word.contains(c) {
                     return false;
                 }
             }
             CharacterCorrectness::IncorrectPosition(c) => {
-                if *c == word_character || !word.contains(*c) {
+                let mut foundchar = false;
+                for (idx, character) in word.chars().enumerate() {
+                    if idx == correctness.pos && character == c {
+                        return false;
+                    } else if character == c {
+                        foundchar = true;
+                    }
+                }
+                if !foundchar {
                     return false;
                 }
             }
             CharacterCorrectness::CorrectPosition(c) => {
-                if *c != word_character {
+                if c != word.chars().nth(correctness.pos).unwrap() {
                     return false;
                 }
             }
         }
     }
-    return true;
+    true
+}
+
+/// Generates the weights for a particular dictionary based on the weights from a file.
+pub(crate) fn generate_dict_weights_map<'a>(
+    frequency_map: Option<&'a FxHashMap<String, f64>>,
+    dictionary: &'a Vec<&str>,
+) -> FxHashMap<&'a str, f64> {
+    let mut dict_weight_map: FxHashMap<&str, f64> = FxHashMap::default();
+    match frequency_map {
+        Some(frequency_map) => {
+            for word in dictionary {
+                dict_weight_map.insert(word, *frequency_map.get(*word).unwrap_or(&0.0_f64));
+            }
+        }
+        None => {
+            for word in dictionary {
+                dict_weight_map.insert(word, 1.0_f64);
+            }
+        }
+    }
+    dict_weight_map
 }
 
 #[cfg(test)]
 mod test {
-    use crate::word_stats::{is_valid_guess, CharacterCorrectness, WordGuess};
+    use crate::word_stats::{is_valid_guess, CharacterCorrectness, CharacterRENAMEME};
 
     #[test]
     fn valid_guess() {
         let original_guess = "weary";
         let possible_guesses = vec!["wacko", "waift", "wails", "waist", "woman", "watch"];
         let impossible_guesses = vec!["xncro", "ircpm", "dream", "crown", "weary"];
-        let wg: WordGuess = vec![
-            CharacterCorrectness::CorrectPosition('w'),
-            CharacterCorrectness::NotInWord('e'),
-            CharacterCorrectness::IncorrectPosition('a'),
-            CharacterCorrectness::NotInWord('r'),
-            CharacterCorrectness::NotInWord('y'),
+        let wg = vec![
+            CharacterRENAMEME {
+                pos: 0,
+                character: CharacterCorrectness::CorrectPosition('w'),
+            },
+            CharacterRENAMEME {
+                pos: 1,
+                character: CharacterCorrectness::NotInWord('e'),
+            },
+            CharacterRENAMEME {
+                pos: 2,
+                character: CharacterCorrectness::IncorrectPosition('a'),
+            },
+            CharacterRENAMEME {
+                pos: 3,
+                character: CharacterCorrectness::NotInWord('r'),
+            },
+            CharacterRENAMEME {
+                pos: 4,
+                character: CharacterCorrectness::NotInWord('y'),
+            },
         ];
         assert!(!is_valid_guess(&wg, original_guess));
         for guess in possible_guesses {
@@ -179,12 +254,27 @@ mod test {
             assert!(!is_valid_guess(&wg, guess));
         }
         let original_guess = "slate";
-        let wg: WordGuess = vec![
-            CharacterCorrectness::IncorrectPosition('s'),
-            CharacterCorrectness::IncorrectPosition('l'),
-            CharacterCorrectness::IncorrectPosition('a'),
-            CharacterCorrectness::IncorrectPosition('t'),
-            CharacterCorrectness::IncorrectPosition('e'),
+        let wg = vec![
+            CharacterRENAMEME {
+                pos: 0,
+                character: CharacterCorrectness::IncorrectPosition('s'),
+            },
+            CharacterRENAMEME {
+                pos: 1,
+                character: CharacterCorrectness::IncorrectPosition('l'),
+            },
+            CharacterRENAMEME {
+                pos: 2,
+                character: CharacterCorrectness::IncorrectPosition('a'),
+            },
+            CharacterRENAMEME {
+                pos: 3,
+                character: CharacterCorrectness::IncorrectPosition('t'),
+            },
+            CharacterRENAMEME {
+                pos: 4,
+                character: CharacterCorrectness::IncorrectPosition('e'),
+            },
         ];
         assert!(!is_valid_guess(&wg, original_guess));
     }
