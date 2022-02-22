@@ -1,9 +1,13 @@
-use rustc_hash::FxHashMap;
-
 use crate::{
-    information_theory::calculate_entropy_distribution,
-    word_stats::{self, CharacterRENAMEME},
+    file_operations::{read_permutation_file, SingleGuess, WordPossibilities},
+    information_theory,
+    word_stats::{self, is_valid_guess, CharacterRENAMEME},
 };
+use indicatif::ParallelProgressIterator;
+use ordered_float::NotNan;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rustc_hash::FxHashMap;
+use std::sync::RwLock;
 
 pub(crate) struct Game<'a> {
     wordle_data: WordleData<'a>,
@@ -14,6 +18,8 @@ impl<'dict> Game<'dict> {
     pub fn new(
         weight_map: Option<FxHashMap<&'dict str, f64>>,
         dictionary: Option<&'dict Vec<&str>>,
+        permutation_file_name: &str,
+        // frequency_file_name: &str,
     ) -> Game<'dict> {
         let weight_map = match weight_map {
             Some(wm) => wm,
@@ -25,7 +31,7 @@ impl<'dict> Game<'dict> {
             None => todo!(),
         };
         Game {
-            wordle_data: WordleData::new(weight_map, dictionary),
+            wordle_data: WordleData::new(weight_map, dictionary, permutation_file_name),
             guess_stats: Vec::new(),
         }
     }
@@ -51,7 +57,7 @@ impl<'dict> Game<'dict> {
 
         let original_count: f64 = self.remaining_words() as f64;
         let new_count: f64 = original_count - self.eliminate_words() as f64;
-        let actual_entropy = (original_count/new_count).log2();
+        let actual_entropy = (original_count / new_count).log2();
         let guess_data = GuessData {
             estimated_entropy,
             actual_entropy,
@@ -61,12 +67,20 @@ impl<'dict> Game<'dict> {
         self.guess_stats.push(guess_data.clone());
         guess_data
     }
+
+    pub fn prioritize_position(&mut self) {
+        self.wordle_data.prioritize_position()
+    }
+    pub fn prioritize_entropy(&mut self) {
+        self.wordle_data.prioritize_entropy()
+    }
 }
 
 struct WordleData<'dict> {
     dictionary: Vec<&'dict str>,
     weight_dictionary: FxHashMap<&'dict str, f64>,
     dictionary_weights: FxHashMap<&'dict str, f64>,
+    permutation_map: FxHashMap<String, WordPossibilities>,
     weight_sum: f64,
     data_bits: Vec<CharacterRENAMEME>,
 }
@@ -75,14 +89,30 @@ impl<'dict> WordleData<'dict> {
     pub fn new(
         weights: FxHashMap<&'dict str, f64>,
         dictionary: &'dict Vec<&str>,
+        permutation_file_name: &str,
     ) -> WordleData<'dict> {
         let dictionary_weights: FxHashMap<&'dict str, f64> =
             generate_dict_weights_map(Some(&weights), dictionary);
+        let mut permutation_map = read_permutation_file(permutation_file_name).possibilities;
         let sum = dictionary_weights.values().sum::<f64>();
+
+        for word in dictionary {
+            match permutation_map.get(*word) {
+                Some(_) => (),
+                None => {
+                    println!("Warning! Permutation Map does not contain {word}! Calculating...");
+                    permutation_map.insert(
+                        { *word }.to_string(),
+                        information_theory::generate_possibilities(*word),
+                    );
+                }
+            }
+        }
         Self {
             dictionary: dictionary.to_vec(), // CHECK: Is this right?
             weight_sum: sum,
             dictionary_weights,
+            permutation_map,
             weight_dictionary: weights,
             data_bits: Vec::default(),
         }
@@ -101,9 +131,67 @@ impl<'dict> WordleData<'dict> {
     }
 
     fn estimated_entropy(&self, guess: &str) -> f64 {
-        let distribution =
-            calculate_entropy_distribution(guess, &self.dictionary, &self.dictionary_weights);
+        let distribution = self.calculate_entropy_distribution(guess);
         distribution.iter().sum::<f64>() // TODO: This should be just the sum? See video
+    }
+
+    fn get_pattern_words(&self, validation: &SingleGuess) -> Vec<&str> {
+        let lst = self
+            .dictionary
+            .par_iter()
+            .filter_map(|s| {
+                if is_valid_guess(&validation.guess, s) {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        lst
+    }
+
+    fn calculate_pattern_probability(&self, validation: &SingleGuess) -> f64 {
+        let prob = self
+            .get_pattern_words(validation)
+            .iter()
+            .map(|f| self.weight_dictionary.get(*f).unwrap_or(&0_f64))
+            .sum::<f64>();
+        // TODO: Come up with a slightly more reasonable way to do this.
+        prob / self.weight_sum
+    }
+
+    fn calculate_entropy_distribution(&self, guess: &str) -> Vec<f64> {
+        self.permutation_map
+            .get(guess)
+            .unwrap()
+            // TODO: It's annoyingly difficult to do error handling here. How might this be done?
+            // .unwrap_or_else(|| {
+            // eprint!(
+            // "Error! Word \"{guess}\" was not in the dictionary. Calculating on the fly."
+            // );
+            // self.permutation_map.write().unwrap().insert(
+            // guess.to_string(),
+            // information_theory::generate_possibilities(guess),
+            // );
+            // let x = self.permutation_map
+            // .read()
+            // .unwrap()
+            // .get(guess)
+            // .expect("Just added word to dictionary yet it's not there?");
+            // x
+            // })
+            .guesses
+            .iter()
+            .map(|pattern| {
+                let probability = self.calculate_pattern_probability(pattern);
+                let entropy = information_theory::calculate_pattern_entropy(probability);
+                let information = probability * entropy;
+                if information.is_nan() {
+                    return 0.0;
+                }
+                information
+            })
+            .collect()
     }
 
     pub fn eliminate_words(&mut self) -> usize {
@@ -111,6 +199,42 @@ impl<'dict> WordleData<'dict> {
             .drain_filter(|word| !word_stats::is_valid_guess(&self.data_bits, word))
             .count()
     }
+
+    fn calculate_expected_entropy(&self, guess: &str) -> f64 {
+        self.calculate_entropy_distribution(guess)
+            .iter()
+            .sum::<f64>()
+    }
+
+    // Sort `self.dictionary` based on the entropy that each word has
+    pub fn prioritize_entropy(&mut self) {
+        let entropy_map: FxHashMap<&str, f64> = self
+            .dictionary
+            .par_iter()        
+            .progress_with(
+                indicatif::ProgressBar::new(self.dictionary.len() as u64)
+                    .with_message("Entropy Calcuations")
+                    .with_style(
+                        indicatif::ProgressStyle::default_bar()
+                            .template(
+                                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg} ({eta})",
+                            )
+                            .progress_chars("##-"),
+                    ),
+            )
+            .map(|word| (*word, self.calculate_expected_entropy(word)))
+            .collect();
+        self.dictionary.sort_by_key(|s| {
+            NotNan::new(*entropy_map.get(s).unwrap_or_else(|| {
+                eprintln!("Warning: {s} not in entropy map. Defaulting to 0 entropy");
+                &0.0
+            }))
+            .unwrap()
+        });
+        self.dictionary.reverse();
+    }
+
+    pub fn prioritize_position(&mut self) {}
 }
 
 #[derive(Clone, Debug)]

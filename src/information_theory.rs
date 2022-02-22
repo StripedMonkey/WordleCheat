@@ -1,27 +1,31 @@
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rustc_hash::FxHashMap;
 
-use crate::word_stats::{
-    is_valid_guess, CharacterCorrectness, CharacterRENAMEME, WordGuess, WORDLESIZE,
+use crate::{
+    file_operations::{SingleGuess, WordPossibilities},
+    word_stats::{is_valid_guess, CharacterCorrectness, CharacterRENAMEME, WordGuess, WORDLESIZE},
 };
 
 /// Generates possible wordle combinations from the given set. I.E all incorrect, all correct, etc.
-fn generate_possibilities(word: &str) -> Vec<WordGuess> {
-    let mut possibilities: Vec<WordGuess> = Vec::new();
+pub(crate) fn generate_possibilities(word: &str) -> WordPossibilities {
+    let mut possibilities: Vec<SingleGuess> = Vec::new();
     let mut it = word.chars().enumerate();
     for possibility in get_character_possibilities(it.next().unwrap().1) {
-        possibilities.push(vec![CharacterRENAMEME {
-            pos: 0,
-            character: possibility,
-        }]);
+        possibilities.push(
+            vec![CharacterRENAMEME {
+                pos: 0,
+                character: possibility,
+            }]
+            .into(),
+        );
     }
     for (pos, character) in it {
-        let mut new_possibilities: Vec<WordGuess> = Vec::new();
+        let mut new_possibilities: Vec<SingleGuess> = Vec::new();
         for correctness in get_character_possibilities(character) {
-            let mut new = Vec::new();
+            let mut new: Vec<SingleGuess> = Vec::new();
             for p in &possibilities {
                 let mut u = p.clone();
-                u.push(CharacterRENAMEME {
+                u.guess.push(CharacterRENAMEME {
                     pos,
                     character: correctness.clone(),
                 });
@@ -33,10 +37,12 @@ fn generate_possibilities(word: &str) -> Vec<WordGuess> {
     }
 
     for possibility in &possibilities {
-        assert_eq!(possibility.len(), word.chars().count());
+        assert_eq!(possibility.guess.len(), word.chars().count());
     }
-    assert_eq!(possibilities.len(), 243);
-    possibilities
+    assert_eq!(possibilities.len(), 3_usize.pow(word.len() as u32));
+    WordPossibilities {
+        guesses: possibilities,
+    }
 }
 
 fn get_character_possibilities(character: char) -> Vec<CharacterCorrectness> {
@@ -63,6 +69,7 @@ pub(crate) fn calculate_entropy_distribution(
     weights: &FxHashMap<&str, f64>,
 ) -> Vec<f64> {
     generate_possibilities(guess)
+        .guesses
         .iter()
         .map(|pattern| {
             let probability = calculate_pattern_probability(pattern, dictionary, &weights);
@@ -76,12 +83,12 @@ pub(crate) fn calculate_entropy_distribution(
         .collect()
 }
 
-fn calculate_pattern_entropy(probability: f64) -> f64 {
+pub fn calculate_pattern_entropy(probability: f64) -> f64 {
     (1.0 / probability).log2()
 }
 
 fn calculate_pattern_probability(
-    validation: &WordGuess,
+    validation: &SingleGuess,
     dictionary: &Vec<&str>,
     weights: &FxHashMap<&str, f64>,
 ) -> f64 {
@@ -93,11 +100,11 @@ fn calculate_pattern_probability(
     prob / weights.values().sum::<f64>()
 }
 
-fn get_pattern_words<'a>(validation: &WordGuess, dictionary: &Vec<&'a str>) -> Vec<&'a str> {
+fn get_pattern_words<'a>(validation: &SingleGuess, dictionary: &Vec<&'a str>) -> Vec<&'a str> {
     let lst = dictionary
         .par_iter()
         .filter_map(|s| {
-            if is_valid_guess(validation, s) {
+            if is_valid_guess(&validation.guess, s) {
                 Some(*s)
             } else {
                 None
@@ -143,7 +150,7 @@ mod test {
     use ordered_float::NotNan;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-    use crate::file_reading::read_frequencytable_file;
+    use crate::file_operations::read_frequency_file;
     use crate::filter_dictionary;
     use crate::information_theory::count_valid_patterns;
     use crate::word_stats::{
@@ -222,7 +229,7 @@ mod test {
             .split("\n")
             .collect();
         let temp_dictionary = working_dictionary.clone();
-        let freq_map = &read_frequencytable_file("count_1w.txt");
+        let freq_map = &read_frequency_file("count_1w.txt");
         let mut xx: Vec<(&str, f64)> = working_dictionary
             .par_iter()
             .map(|s| {
@@ -253,7 +260,7 @@ mod test {
     fn possibility_count() {
         let word = "slate";
         let x = generate_possibilities(word);
-        assert_eq!(x.len() as f64, 3.0_f64.powi(word.len() as i32))
+        assert_eq!(x.guesses.len() as f64, 3.0_f64.powi(word.len() as i32))
     }
 
     // #[test]

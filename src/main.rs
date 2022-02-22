@@ -2,7 +2,7 @@
 #[macro_use]
 extern crate approx;
 
-mod file_reading;
+mod file_operations;
 mod information_theory;
 mod manual_guessing;
 mod word_stats;
@@ -10,8 +10,15 @@ mod wordle_data;
 
 use crate::{manual_guessing::readline, word_stats::generate_dict_weights_map};
 use word_stats::{
-    sort_dictionary_frequency, sort_dictionary_location, CorrectPosition, IncorrectPosition,
+    sort_dictionary_frequency, sort_dictionary_location, CorrectPosition, GuessResult,
+    IncorrectPosition,
 };
+
+enum GuessingStrategy {
+    Entropy,
+    Positional,
+    CharacterFrequency,
+}
 
 fn main() {
     let dictionary: Vec<&str> = include_str!("../Dictionary3b1bValidAnswers.txt")
@@ -23,19 +30,23 @@ fn main() {
     // let word_len: usize = readline();
     // dictionary.drain_filter(|f| f.len() != word_len);
 
-    let mut game = wordle_data::Game::new(Some(weight_map), Some(&dictionary));
 
-    println!("Use entropy approach (e) or heurisitc approach? (h)");
+    println!("Generate Guess Data (G), Use entropy approach (e) or heurisitc approach? (h)");
     match readline().to_ascii_lowercase().as_str() {
-        "e" => manual_guessing::manual_guessing_entropy(&mut game),
+        "e" => {
+            let mut game = wordle_data::Game::new(Some(weight_map), Some(&dictionary),"PermutationMap.bin");
+            manual_guessing::manual_guessing(&mut game, GuessingStrategy::Entropy)
+        },
         "h" => {
+            let mut game = wordle_data::Game::new(Some(weight_map), Some(&dictionary),"PermutationMap.bin");
             println!("Solve puzzle (s) or find path (p)?");
             match readline().as_str() {
-                "s" => manual_guessing::manual_guessing(dictionary),
+                "s" => manual_guessing::manual_guessing(&mut game, GuessingStrategy::Positional),
                 "p" => manual_guessing::find_path(dictionary),
                 _ => println!("Goodbye"),
             }
         }
+        "g" => file_operations::generate_permutation_file("FrequencyMap.bin", "PermutationMap.bin"),
         _ => println!("Nope"),
     }
 }
@@ -105,27 +116,27 @@ fn find_incorrect_characters(guess: &str, answer: &str) -> Vec<IncorrectPosition
     }
     correct
 }
-fn autosolve<'a, 'b>(
-    dictionary: &mut Vec<&'a str>,
-    answer: &'b str,
-) -> Result<(&'a str, Vec<&'a str>), (&'b str, Vec<&'a str>)> {
-    let mut guesses = Vec::new();
+fn autosolve<'dict, 'answer>(
+    dictionary: &mut Vec<&'dict str>,
+    answer: &'answer str,
+) -> Result<GuessResult<'dict, 'answer>, GuessResult<'dict, 'answer>> {
+    let mut path = Vec::new();
     loop {
         sort_dictionary_frequency(dictionary);
         sort_dictionary_location(dictionary);
         let guess = match dictionary.get(0) {
             Some(i) => {
-                guesses.push(*i);
+                path.push(*i);
                 *i
             }
             None => {
                 println!("Managed to run out of dictionary to search while looking for {answer}");
                 println!("Possibly probably not a word found in the dictionary?");
-                return Err((answer, guesses));
+                return Err(GuessResult { answer, path });
             }
         };
         if guess == answer {
-            return Ok((guess, guesses));
+            return Ok(GuessResult { answer, path });
         }
         filter_dictionary(
             dictionary,
@@ -140,7 +151,19 @@ fn autosolve<'a, 'b>(
 mod test {
     use std::fs::File;
 
-    use crate::{autosolve, word_stats::count_unique_positions};
+    use crate::{
+        autosolve,
+        word_stats::{count_unique_positions, GuessResult},
+    };
+
+    fn ans_solver<'dict, 'answer>(
+        mut dictionary: Vec<&'dict str>,
+        answer_word: &'answer str,
+    ) -> GuessResult<'dict, 'answer> {
+        let ans = autosolve(&mut dictionary, &answer_word).expect("Autosolving failed!");
+        assert_eq!(ans.answer, answer_word);
+        ans
+    }
 
     #[test]
     #[ignore]
@@ -148,13 +171,8 @@ mod test {
         let working_dictionary: Vec<&str> =
             include_str!("../Dictionary2.txt").split("\n").collect();
 
-        let mut guesses: Vec<(&str, Vec<&str>)> = Vec::new();
-        let solver = |answer_word: &&str| {
-            let mut dictionary = working_dictionary.clone();
-            let ans = autosolve(&mut dictionary, &answer_word).expect("Autosolving failed!");
-            assert_eq!(ans.0, *answer_word);
-            ans
-        };
+        let mut guesses: Vec<GuessResult> = Vec::new();
+        let solver = |&ans| ans_solver(working_dictionary.clone(), ans);
         use rayon::prelude::*;
         working_dictionary
             .par_iter()
@@ -164,12 +182,12 @@ mod test {
         write_results(guesses, "test.csv")
     }
 
-    fn write_results(guesses: Vec<(&str, Vec<&str>)>, filename: &str) {
+    fn write_results(guesses: Vec<GuessResult>, filename: &str) {
         use std::io::Write as IoWrite;
         let mut f = File::create(filename).expect("Unable to create file");
         writeln!(&mut f, "Answer,Path Length,Path").expect("Failed to write to file!");
-        for (answer, path) in guesses {
-            writeln!(&mut f, "{:?}", (answer, path)).expect("Failed to write to file!");
+        for guess in guesses {
+            writeln!(&mut f, "{:?}", (guess.answer, guess.path)).expect("Failed to write to file!");
         }
     }
     #[test]
@@ -178,7 +196,7 @@ mod test {
             .split("\n")
             .collect();
         let ans = autosolve(&mut working_dictionary, "eater").expect("Autosolving failed!");
-        println!("{}", ans.1.len());
+        println!("{}", ans.path.len());
     }
 
     #[test]

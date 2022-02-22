@@ -5,7 +5,7 @@ use ordered_float::NotNan;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
-use crate::{file_reading::read_frequencytable_file, information_theory::calculate_expected_entropy};
+use crate::{information_theory::calculate_expected_entropy, file_operations::read_frequency_file};
 
 pub(crate) const WORDLESIZE: usize = 5;
 
@@ -31,6 +31,12 @@ pub(crate) struct CharFrequencies {
 pub(crate) struct CharPosition {
     pub position: usize,
     pub character: char,
+}
+
+#[derive(Debug)]
+pub(crate) struct GuessResult<'dict, 'answer> {
+    pub answer: &'answer str,
+    pub path: Vec<&'dict str>,
 }
 
 pub(crate) type WordGuess = Vec<CharacterRENAMEME>;
@@ -98,8 +104,8 @@ pub(crate) fn sort_dictionary_frequency(dictionary: &mut Vec<&str>) {
 /// Sort a dictionary by the most common locations for characters to least common
 pub(crate) fn sort_dictionary_location(dictionary: &mut Vec<&str>) {
     let unique_positions = count_unique_positions(dictionary);
-    dictionary.sort_by_cached_key(|a| count_location(&unique_positions, a));
-    dictionary.reverse();
+    dictionary.sort_by_key(|a| count_location(&unique_positions, a));
+    // dictionary.reverse();
 }
 
 /// Sort a dictionary based on the entropy of a dictionary with progress bars
@@ -128,7 +134,10 @@ pub(crate) fn sort_dictionary_entropy_progress(
                 calculate_expected_entropy(
                     s,
                     filtered_dictionary,
-                    &generate_dict_weights_map(Some(&read_frequencytable_file("count_1w.txt")), guess_dictionary),
+                    &generate_dict_weights_map(
+                        Some(&read_frequency_file("count_1w.txt")),
+                        guess_dictionary,
+                    ),
                 ),
             )
         })
@@ -139,8 +148,12 @@ pub(crate) fn sort_dictionary_entropy_progress(
 
 pub(crate) fn count_location(positions: &FxHashMap<char, Vec<usize>>, word: &str) -> usize {
     let mut value: usize = 0;
+    let mut searched_characters = Vec::new();
     for (i, character) in word.chars().enumerate() {
-        value += positions.get(&character).expect("Couldn't find character!")[i];
+        if searched_characters.contains(&character) {
+            searched_characters.push(character);
+            value += positions.get(&character).expect("Couldn't find character!")[i];
+        }
     }
     value
 }
